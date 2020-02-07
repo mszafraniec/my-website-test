@@ -6,6 +6,177 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE,message = FALSE, warning = FALSE)
 ```
+
+## attach packages
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(here)
+library(paletteer)
+library(tsibble)
+library(fable)
+library(fabletools)
+library(feasts)
+library(forcats)
+library(sf)
+library(tmap)
+library(mapview)
+
+```
+
+# us energy
+
+```{r}
+
+us_renew<-read_csv(here("data","renewables_cons_prod.csv")) %>% 
+  clean_names()
+
+```
+
+
+Make the discription all lowercase and only keep options when discription variable only contains one pattern of consuption. remove any obs where discription includes the word total
+
+```{r}
+renew_clean<-us_renew %>%
+  mutate(description = str_to_lower(description)) %>% 
+  filter(str_detect(description, pattern ="consumption")) %>% 
+  filter(!str_detect(description, pattern ="total"))
+
+```
+
+convert yyyymm to a date 
+
+```{r}
+
+renew_date<-renew_clean %>% 
+  mutate(yr_mo_day=lubridate::parse_date_time(yyyymm,"ym")) %>% 
+  mutate(month_sep = yearmonth(yr_mo_day)) %>% 
+  mutate(value=as.numeric(value)) %>% 
+  drop_na(month_sep,value)
+
+#make a verison where month and year are in seperate columns
+
+renew_parsed<-renew_date %>% 
+  mutate(month=month(yr_mo_day,label = TRUE)) %>% 
+  mutate(year=year(yr_mo_day))
+
+
+```
+
+# look at it 
+
+```{r}
+renew_gg<-ggplot(renew_date, aes(x = month_sep, y=value, group = description))+
+  geom_line(aes(color=description)) #you dont have to do both group and color they are redundent
+
+renew_gg
+
+view(palettes_d_names) #look at all the colors in paletter
+```
+
+#update color in renew gg
+
+```{r}
+renew_gg+scale_color_paletteer_d("calecopal::kelp1")
+```
+
+## coerce r renew_parsed to a tsibble
+
+```{r}
+renew_ts<-as_tsibble(renew_parsed, key = description, index = month_sep)
+
+
+```
+
+Lets look at time shit in a few ways
+```{r}
+renew_ts %>% autoplot(value)
+renew_ts %>% gg_subseries(value)
+
+renew_ts %>% gg_season(value)
+
+ggplot(data=renew_parsed, aes(x=month,y=value,group=year))+
+  geom_line(aes(color=year))+
+  facet_wrap(~description,
+             ncol=1,
+             scale="free",
+             strip.position="right")
+
+
+```
+
+just look at hydroelectric 
+
+```{r}
+hydro_ts<-renew_ts %>% 
+  filter(description=="hydroelectric power consumption")
+
+hydro_ts %>% autoplot(value)
+hydro_ts %>% gg_subseries(value)
+hydro_ts %>% gg_season(value)
+
+ggplot(hydro_ts,aes(x=month,y=value,group=year))+
+  geom_line(aes(color=year))
+
+
+```
+
+### what if i want the quarterly consumption for hydro
+
+```{r}
+
+hydro_quarterly<-hydro_ts %>% 
+  index_by(year_qu=~(yearquarter(.))) %>% 
+  summarize(avg_consumption=mean(value))
+
+head(hydro_quarterly)
+
+```
+
+# lets decompose that time data 
+
+```{r}
+dcmp<-hydro_ts %>% 
+  model(STL(value~season(window=5)))
+
+
+components(dcmp) %>% autoplot
+
+```
+
+
+```{r}
+hist(components(dcmp)$remainder) # check if remainders are normally distributed
+```
+
+Now lets look at ACF
+
+```{r}
+
+hydro_ts %>% 
+  ACF(value) %>% 
+  autoplot()
+
+#observation 12 months apart are more highly corrolated than any other plot 
+
+```
+
+# DANGER DANGER read a god damn book first
+
+```{r}
+hydro_model<-hydro_ts %>% 
+  model(
+    ARIMA(value)
+  ) %>% 
+  fabletools::forecast(h="4 years")
+
+hydro_model %>% autoplot(filter(hydro_ts,year(month_sep)>2010))
+
+
+```
+
 
